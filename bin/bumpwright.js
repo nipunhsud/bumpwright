@@ -267,8 +267,16 @@ function collectPnpmAudit(counts) {
   return majors;
 }
 
+function isYarnBerry() {
+  // .yarnrc.yml alone does NOT mean berry: yarn 1 ignores that file, so a classic repo can carry
+  // one (a leftover, or a stray nodeLinker line) and still resolve through a v1 lockfile.
+  // The lockfile format is the authoritative signal — classic always writes this banner.
+  try { return !/^# yarn lockfile v1$/m.test(fs.readFileSync("yarn.lock", "utf8")); }
+  catch { return false; }
+}
+
 function collectYarnAudit(counts) {
-  if (fs.existsSync(".yarnrc.yml")) die("yarn berry (v2+) isn't supported yet — classic yarn.lock only");
+  if (isYarnBerry()) die("yarn berry (v2+) isn't supported yet — classic yarn.lock only");
   console.log("→ yarn audit --json");
   const audit = run("yarn audit --json");
   const majors = new Map();

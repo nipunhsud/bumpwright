@@ -29,6 +29,6 @@
     "url": "git+https://github.com/nipunhsud/bumpwright.git"
   },
   "scripts": {
-    "test": "bash test/smoke.sh && bash test/mcp.sh && bash test/v02.sh && bash test/python.sh && bash test/audit-eco.sh && bash test/fix.sh && bash test/go.sh"
+    "test": "bash test/smoke.sh && bash test/mcp.sh && bash test/v02.sh && bash test/python.sh && bash test/audit-eco.sh && bash test/yarn-berry.sh && bash test/fix.sh && bash test/go.sh"
   }
 }
