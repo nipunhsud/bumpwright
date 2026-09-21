@@ -38,3 +38,30 @@ git show "$BR:go.mod" | grep -q "x/text v0\.3\.[0-6]$" && { echo "FAIL: x/text s
 git log "$BR" -1 --pretty=%B | grep -q "pkg.go.dev/vuln/GO-" || { echo "FAIL: no Go advisory link"; exit 1; }
 [ -z "$(git status --porcelain)" ] || { echo "FAIL: dirty tree"; exit 1; }
 echo "GO OK"
+
+# --- module-level findings (vulnerable module required, code never called) are NOT targets ---
+mkdir "$TMP/unreached" && cd "$TMP/unreached"
+git init -q -b main && git config user.email t@t && git config user.name t
+cat > go.mod <<'MOD'
+module bwunreached
+
+go 1.21
+
+require golang.org/x/text v0.3.5
+MOD
+cat > main.go <<'GO'
+package main
+
+import (
+	"fmt"
+
+	"golang.org/x/text/width"
+)
+
+func main() { fmt.Println(width.Narrow.String()) }
+GO
+go mod tidy >/dev/null 2>&1
+git add -A && git commit -qm init
+OUT=$(node "$BW" audit 2>&1) || true
+git branch --list 'bumpwright/*' | grep -q . && { echo "FAIL: branch created for an unreached vuln"; echo "$OUT" | tail -5; exit 1; }
+echo "GO UNREACHED OK"

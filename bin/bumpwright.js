@@ -326,12 +326,17 @@ function collectGoAudit(counts) {
     const t0 = f.trace[0];
     const mod = t0.module;
     if (!mod) continue;
+    // govulncheck emits module-, package-, and symbol-level findings. Only a
+    // symbol-level finding (trace[0].function set) means the vulnerable code is
+    // actually called. The rest are "present but not reached" — not a target.
+    if (!t0.function) { counts.unreached = (counts.unreached || 0) + 1; continue; }
     const cur = t0.version;
     if (cur && isDowngrade(f.fixed_version, cur)) { counts.downgrades++; continue; }
-    // Go get raises transitive deps first-class — every fixable finding is a target
+    // Go get raises transitive deps first-class — every reachable finding is a target
     addTarget(majors, mod, f.fixed_version, "security", [`https://pkg.go.dev/vuln/${f.osv}`], counts);
   }
-  console.log(`→ ${majors.size} reachable vulnerable module(s) with a fixed version (govulncheck is call-graph aware)`);
+  if (counts.unreached) console.log(`→ ${counts.unreached} finding(s) in imported modules whose vulnerable code is never called — not targeted`);
+  console.log(`→ ${majors.size} reachable vulnerable module(s) with a fixed version (symbol-level govulncheck findings)`);
   return majors;
 }
 
