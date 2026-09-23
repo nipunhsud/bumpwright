@@ -126,6 +126,27 @@ its advisory and the instruction to remove it once the parent updates. Red →
 reverted, nothing ships. Off by default because overrides are debt — this
 makes the debt visible, gated, and removable instead of silent.
 
+## `bumpwright repair` — when the gate is already red
+
+An upgrade needs a green baseline to prove anything, so bumpwright refuses to
+start on a repo whose tests or build already fail. `repair` is the mode for
+that state:
+
+```
+bumpwright repair [--test <cmd>] [--max-iters n] [--pr]
+```
+
+It drives an agent until the gate goes from red to green, on its own branch.
+The success criterion is objective, and the agent is fenced in:
+
+- the gate command is frozen, so success can't be redefined
+- dependency manifests are reverted if touched — repair fixes code, not deps
+- edits to test files are flagged in the console and in the commit message
+- the agent is instructed to fix the root cause, never to skip or weaken tests
+
+Review the diff before merging: a green gate proves the failure is gone, not
+that the reasoning was right.
+
 ## `bumpwright fix` — the non-breaking half
 
 ```

@@ -9,6 +9,7 @@ const HELP = `bumpwright <package>[@version] [options]
        bumpwright audit [options]      Fix every vulnerability that needs a breaking upgrade
        bumpwright fix [options]        Apply npm audit fix behind your test gate (non-breaking)
        bumpwright audit --overrides    Also pin vulnerable TRANSITIVE deps to patched floors (temporary, gated)
+       bumpwright repair [options]     Gate already red? Drive an agent until it goes green (no deps touched)
 
 Upgrades an npm dependency, runs your tests, and if they break, drives a
 coding agent to migrate your calling code until they pass again.
@@ -30,6 +31,13 @@ function run(cmd, opts = {}) {
 }
 
 function die(msg) { console.error(`bumpwright: ${msg}`); process.exit(1); }
+
+function commit(message) {
+  // message goes in on stdin: no shell, so backticks/$() in a gate command
+  // or filename can never be executed.
+  const r = spawnSync("git", ["commit", "-F", "-"], { input: message, encoding: "utf8" });
+  return { code: r.status ?? 1, out: (r.stdout || "") + (r.stderr || "") };
+}
 
 function need(val, flag) {
   if (val === undefined || String(val).startsWith("--")) die(`${flag} needs a value`);
@@ -385,6 +393,101 @@ function collectPyAudit(counts) {
   return majors;
 }
 
+function repairMode(argv) {
+  const a = { test: null, agent: "claude -p --permission-mode acceptEdits", maxIters: 3, branch: true, pr: false };
+  for (let i = 0; i < argv.length; i++) {
+    const v = argv[i];
+    if (v === "--test") a.test = need(argv[++i], "--test");
+    else if (v === "--agent") a.agent = need(argv[++i], "--agent");
+    else if (v === "--max-iters") { const n = parseInt(need(argv[++i], "--max-iters"), 10); a.maxIters = Number.isNaN(n) || n < 1 ? 3 : n; }
+    else if (v === "--no-branch") a.branch = false;
+    else if (v === "--pr") a.pr = true;
+    else die(`unrecognized argument: ${v}`);
+  }
+  if (run("git rev-parse --is-inside-work-tree").code !== 0) die("not a git repository");
+  const dirty = run("git status --porcelain").out.split("\n").filter((l) => l.trim() && !l.startsWith("??"));
+  if (dirty.length) die("tracked files modified — commit or stash first");
+
+  if (!a.test) {
+    const pm = isPython() ? { test: "pytest" } : isGo() ? { test: "go test ./..." } : detectPm();
+    a.test = pm.test;
+    if (!isPython() && !isGo() && fs.existsSync("package.json")) {
+      const pj = JSON.parse(fs.readFileSync("package.json", "utf8"));
+      const t = pj.scripts && pj.scripts.test;
+      if ((!t || /no test specified/i.test(t)) && pj.scripts && pj.scripts.build) a.test = `${a.test.split(" ")[0]} run build`;
+      else if (t && /react-scripts test/.test(t)) a.test = "CI=true npm test -- --watchAll=false";
+    }
+  }
+
+  console.log(`→ gate: ${a.test}`);
+  const before = run(a.test);
+  if (before.code === 0) { console.log("✓ gate is already green — nothing to repair"); process.exit(0); }
+
+  const startRef = run("git rev-parse HEAD").out.trim();
+  if (a.branch) {
+    if (run("git checkout -b bumpwright/repair").code !== 0) die("could not create branch bumpwright/repair (already exists?)");
+    console.log("→ branch bumpwright/repair");
+  }
+
+  // Files the agent must not "fix" by deleting the evidence.
+  const testish = (f) => /(^|\/)(tests?|__tests__|spec)(\/|$)|\.(test|spec)\.[jt]sx?$|_test\.go$|test_.*\.py$/i.test(f);
+
+  let out = before.out, result = before;
+  for (let i = 1; i <= a.maxIters; i++) {
+    console.log(`✗ gate red — repair attempt ${i}/${a.maxIters}`);
+    const prompt = `The command \`${a.test}\` fails in this repository, on a clean checkout, before any dependency change.
+
+Diagnose the root cause and fix it so the command passes.
+
+Rules:
+- Do NOT change, skip, weaken, or delete tests to make this pass. Fix the code or configuration that is actually broken.
+- Do NOT change the command itself, and do not add flags that hide the failure.
+- Do NOT upgrade, downgrade, add, or remove dependencies. This is a repair of existing code, not a dependency change.
+- Keep the diff minimal and explain the root cause in your final message.
+
+Failing output:
+${result.out.slice(-8000)}`;
+    const agent = spawnSync(a.agent, { shell: true, input: prompt, stdio: ["pipe", "inherit", "inherit"] });
+    if ((agent.status ?? 1) !== 0) console.error("bumpwright: agent command exited non-zero, re-running the gate anyway");
+
+    const depsTouched = run(`git diff --name-only "${startRef}"`).out.split("\n")
+      .filter((f) => /(^|\/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|go\.mod|go\.sum|requirements\.txt|pyproject\.toml)$/.test(f.trim()));
+    if (depsTouched.length) {
+      console.error(`bumpwright: agent modified dependency manifests (${depsTouched.join(", ")}) — reverting those, repair must not change deps`);
+      for (const f of depsTouched) run(`git checkout "${startRef}" -- "${f}"`);
+    }
+
+    console.log(`→ ${a.test}`);
+    result = run(a.test);
+    out = result.out;
+    if (result.code === 0) break;
+    if (i === a.maxIters) {
+      console.error(out.slice(-3000));
+      console.error(`\nbumpwright: gate still red after ${a.maxIters} repair attempts.`);
+      console.error(a.branch ? "Branch bumpwright/repair left in place for manual work." : "Changes left in working tree.");
+      process.exit(1);
+    }
+  }
+
+  const changed = run(`git diff --name-only "${startRef}"`).out.split("\n").map((f) => f.trim()).filter(Boolean);
+  const touchedTests = changed.filter(testish);
+  console.log("✓ gate green");
+  if (touchedTests.length) console.log(`⚠ test files changed — review these closely: ${touchedTests.join(", ")}`);
+  run("git add -A");
+  const msg = `Repair: make "${a.test}" pass again\n\n` +
+    `The gate was failing on a clean checkout before any dependency change.\n` +
+    `Files changed: ${changed.join(", ")}\n` +
+    (touchedTests.length ? `\nWARNING: test files were modified (${touchedTests.join(", ")}) — verify the fix is real.\n` : "") +
+    `\nAutomated by bumpwright repair; review before merging.`;
+  if (commit(msg).code !== 0) die("git commit failed");
+  console.log("✓ committed repair");
+  if (a.pr) {
+    if (run("git push -u origin bumpwright/repair").code !== 0) die("git push failed");
+    if (run("gh pr create --fill", { stdio: ["ignore", "inherit", "inherit"], encoding: undefined }).code !== 0) die("gh pr create failed");
+  }
+  process.exit(0);
+}
+
 function fixMode(argv) {
   if (!fs.existsSync("package.json")) die("no package.json here — run from your project root");
   if (fs.existsSync("pnpm-lock.yaml") || fs.existsSync("yarn.lock"))
@@ -412,7 +515,7 @@ function fixMode(argv) {
   }
   console.log(`→ baseline: ${a.test}`);
   const base = run(a.test);
-  if (base.code !== 0) { console.error(base.out.slice(-2000)); die(`the gate "${a.test}" is already red — fix that first`); }
+  if (base.code !== 0) { console.error(base.out.slice(-2000)); die(`the gate "${a.test}" is already red — run \`bumpwright repair\` first, or pass a working --test`); }
   if (a.branch) {
     if (run("git checkout -b bumpwright/audit-fix").code !== 0) die("could not create branch bumpwright/audit-fix (already exists?)");
     console.log("→ branch bumpwright/audit-fix");
@@ -433,7 +536,7 @@ function fixMode(argv) {
   for (const f of ["package.json", "package-lock.json", "npm-shrinkwrap.json"])
     if (fs.existsSync(f)) run(`git add -- "${f}"`);
   const msg = "Apply npm audit fix (non-breaking security updates)\n\nAll changes stay within existing semver ranges; the test gate ran green.\n\nAutomated by bumpwright.";
-  if (run(`git commit -m "${msg}"`).code !== 0) die("git commit failed");
+  if (commit(msg).code !== 0) die("git commit failed");
   console.log("✓ committed npm audit fix behind a green gate");
   if (a.pr) {
     if (run("git push -u origin bumpwright/audit-fix").code !== 0) die("git push failed");
@@ -532,7 +635,7 @@ function auditMode(argv) {
       } else {
         run("git add -A");
         const msg = `Security overrides (TEMPORARY) for vulnerable transitive deps\n\n${lines.join("\n")}\n\nThese pins force patched versions that the direct parents do not yet require. Remove each override once its parent updates. Gate '${testCmd}' ran green with the pins applied.\n\nAutomated by bumpwright.`;
-        if (run(`git commit -m "${msg.replace(/"/g, '\\"')}"`).code !== 0) { console.error("bumpwright: commit failed"); failed++; }
+        if (commit(msg).code !== 0) { console.error("bumpwright: commit failed"); failed++; }
         else {
           console.log(`✓ committed ${txT.size} security override(s) behind a green gate`);
           if (argv.includes("--pr")) {
@@ -551,6 +654,7 @@ function auditMode(argv) {
 function main() {
   if (process.argv[2] === "audit") return auditMode(process.argv.slice(3));
   if (process.argv[2] === "fix") return fixMode(process.argv.slice(3));
+  if (process.argv[2] === "repair") return repairMode(process.argv.slice(3));
   const a = parseArgs(process.argv.slice(2));
 
   if (!fs.existsSync("package.json") && !isPython() && !isGo()) die("no package.json, pyproject.toml/requirements.txt, or go.mod here — run from your project root");
@@ -573,7 +677,7 @@ function main() {
   const baseline = run(a.test);
   if (baseline.code !== 0) {
     console.error(baseline.out.slice(-2000));
-    die(`the gate "${a.test}" is already red before any upgrade — fix that first, or pass a working --test`);
+    die(`the gate "${a.test}" is already red before any upgrade — run \`bumpwright repair\` first, or pass a working --test`);
   }
 
   const targets = a.workspaces && !a.pm.py ? workspaceDirs(a.pkg) : ["."];
@@ -650,7 +754,7 @@ ${result.out.slice(-8000)}`;
   run("git add -A");
   const note = process.env.BUMPWRIGHT_NOTE ? `${process.env.BUMPWRIGHT_NOTE}\n\n` : "";
   const msg = `Upgrade ${a.pkg} ${oldVersion} -> ${newVersion} and migrate breaking changes\n\n${note}Automated by bumpwright.`;
-  if (run(`git commit -m "${msg.replace(/"/g, '\\"')}"`).code !== 0) die("git commit failed");
+  if (commit(msg).code !== 0) die("git commit failed");
   console.log(`✓ committed upgrade of ${a.pkg} to ${newVersion}`);
 
   if (a.pr) {
