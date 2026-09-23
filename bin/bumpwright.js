@@ -163,7 +163,10 @@ function addTx(counts, name, version, advisories) {
 function addTarget(majors, name, version, severity, advisories, counts) {
   const cur = installedVersion(name);
   if (cur && isDowngrade(version, cur)) {
-    console.log(`→ skipping ${name}: proposed fix is a downgrade (${cur} -> ${version})`);
+    counts.skipped = counts.skipped || new Set();
+    // several advisories can name the same package; say it once
+    const line = `→ skipping ${name}: proposed fix is a downgrade (${cur} -> ${version}) — no real fix published yet`;
+    if (!counts.skipped.has(line)) { console.log(line); counts.skipped.add(line); }
     counts.downgrades++;
     return;
   }
