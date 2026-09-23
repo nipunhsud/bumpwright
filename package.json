@@ -1,6 +1,6 @@
 {
   "name": "bumpwright",
-  "version": "0.10.3",
+  "version": "0.10.4",
   "description": "Upgrade a dependency, then fix the breaking changes — not just the version number. Dependabot bumps; bumpwright migrates.",
   "bin": {
     "bumpwright": "bin/bumpwright.js",

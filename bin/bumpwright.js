@@ -447,6 +447,7 @@ function auditMode(argv) {
     const v = argv[i];
     if (["--test", "--agent", "--max-iters"].includes(v)) passthrough.push(v, need(argv[++i], v));
     else if (["--pr", "--no-branch", "--workspaces"].includes(v)) passthrough.push(v);
+    else if (v === "--overrides") { /* consumed below */ }
     else stray.push(v);
   }
   if (stray.length)
