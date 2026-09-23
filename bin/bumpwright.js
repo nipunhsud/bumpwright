@@ -760,7 +760,8 @@ function auditMode(argv) {
       const lines = [];
       for (const [n, info] of txT) { dest[n] = `^${info.version}`; lines.push(`- ${n} -> ^${info.version} (${[...new Set(info.advisories)].join(", ") || "audit finding"})`); }
       fs.writeFileSync("package.json", JSON.stringify(pj, null, 2) + "\n");
-      const inst = run(isPnpm ? "pnpm install" : isYarn ? "yarn install" : "npm install");
+      // berry forces --immutable under CI; writing overrides is a deliberate lockfile change
+      const inst = run(isPnpm ? "pnpm install" : isYarn ? "yarn install --no-immutable" : "npm install");
       const after = inst.code === 0 ? run(testCmd) : inst;
       if (after.code !== 0) {
         console.error(after.out.slice(-2500));

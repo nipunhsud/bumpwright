@@ -8,7 +8,8 @@ LOG=$(mktemp)
 # rather than failing the suite for an environment reason.
 setup_berry() {
   yarn set version berry >>"$LOG" 2>&1 || { echo "SKIP: cannot provision yarn berry ($(tail -1 "$LOG"))"; exit 0; }
-  yarn install >>"$LOG" 2>&1 || { echo "SKIP: berry install failed ($(tail -1 "$LOG"))"; exit 0; }
+  # berry forces --immutable when CI=true; these fixtures have no lockfile yet
+  yarn install --no-immutable >>"$LOG" 2>&1 || { echo "SKIP: berry install failed"; tail -5 "$LOG" | sed 's/^/    /'; exit 0; }
 }
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
