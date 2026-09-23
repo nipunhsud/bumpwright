@@ -31,6 +31,11 @@ function run(cmd, opts = {}) {
 
 function die(msg) { console.error(`bumpwright: ${msg}`); process.exit(1); }
 
+function need(val, flag) {
+  if (val === undefined || String(val).startsWith("--")) die(`${flag} needs a value`);
+  return val;
+}
+
 function parseArgs(argv) {
   const pm = isPython() ? { install: "(py)", test: "pytest", sync: pyUsesUv() ? "uv sync" : (fs.existsSync("requirements.txt") ? "python3 -m pip install -r requirements.txt" : "true"), py: true }
     : isGo() ? { install: "(go)", test: "go test ./...", sync: "true", go: true }
@@ -39,10 +44,10 @@ function parseArgs(argv) {
   const rest = [];
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i];
-    if (v === "--test") { a.test = argv[++i]; a.testExplicit = true; }
+    if (v === "--test") { a.test = need(argv[++i], "--test"); a.testExplicit = true; }
     else if (v === "--workspaces") a.workspaces = true;
-    else if (v === "--agent") a.agent = argv[++i];
-    else if (v === "--max-iters") { const n = parseInt(argv[++i], 10); a.maxIters = Number.isNaN(n) || n < 0 ? 3 : n; }
+    else if (v === "--agent") a.agent = need(argv[++i], "--agent");
+    else if (v === "--max-iters") { const n = parseInt(need(argv[++i], "--max-iters"), 10); a.maxIters = Number.isNaN(n) || n < 0 ? 3 : n; }
     else if (v === "--pr") a.pr = true;
     else if (v === "--no-branch") a.branch = false;
     else if (v === "-h" || v === "--help") { console.log(HELP); process.exit(0); }
@@ -384,7 +389,7 @@ function fixMode(argv) {
   const a = { test: "npm test", branch: true, pr: false };
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i];
-    if (v === "--test") a.test = argv[++i];
+    if (v === "--test") a.test = need(argv[++i], "--test");
     else if (v === "--no-branch") a.branch = false;
     else if (v === "--pr") a.pr = true;
   }
@@ -440,7 +445,7 @@ function auditMode(argv) {
   const passthrough = [];
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i];
-    if (["--test", "--agent", "--max-iters"].includes(v)) passthrough.push(v, argv[++i]);
+    if (["--test", "--agent", "--max-iters"].includes(v)) passthrough.push(v, need(argv[++i], v));
     else if (["--pr", "--no-branch", "--workspaces"].includes(v)) passthrough.push(v);
   }
   let useOverrides = false;
