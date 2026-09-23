@@ -27,7 +27,16 @@ Options:
 
 function run(cmd, opts = {}) {
   const r = spawnSync(cmd, { shell: true, encoding: "utf8", ...opts });
-  return { code: r.status ?? 1, out: (r.stdout || "") + (r.stderr || "") };
+  // `out` stays merged for humans; `stdout` alone is what JSON is parsed from,
+  // since npm/pnpm write warnings (which contain braces) to stderr.
+  return { code: r.status ?? 1, out: (r.stdout || "") + (r.stderr || ""), stdout: r.stdout || "" };
+}
+
+function parseJsonOutput(r) {
+  const src = r.stdout && r.stdout.includes("{") ? r.stdout : r.out;
+  const a = src.indexOf("{"), b = src.lastIndexOf("}");
+  if (a < 0 || b <= a) return null;
+  try { return JSON.parse(src.slice(a, b + 1)); } catch { return null; }
 }
 
 function die(msg) { console.error(`bumpwright: ${msg}`); process.exit(1); }
@@ -169,6 +178,39 @@ function installedVersion(name) {
   try { return JSON.parse(fs.readFileSync(path.join("node_modules", name, "package.json"), "utf8")).version; }
   catch { return null; }
 }
+function manifestDeps() {
+  const prod = new Set(), dev = new Set();
+  const read = (dir) => {
+    try {
+      const pj = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
+      for (const n of Object.keys(pj.dependencies || {})) prod.add(n);
+      for (const n of Object.keys(pj.optionalDependencies || {})) prod.add(n);
+      for (const n of Object.keys(pj.devDependencies || {})) dev.add(n);
+    } catch { /* no manifest */ }
+  };
+  read(".");
+  (function walk(d, depth) {
+    if (depth > 3) return;
+    let entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name === "node_modules" || e.name.startsWith(".")) continue;
+      const sub = path.join(d, e.name);
+      if (fs.existsSync(path.join(sub, "package.json"))) read(sub);
+      walk(sub, depth + 1);
+    }
+  })(".", 1);
+  return { prod, dev };
+}
+
+// Is every route from this finding to the manifest a devDependency? Then the
+// vulnerable code never ships to consumers, and a fix is housekeeping.
+function classifyDev(roots, deps) {
+  const named = roots.filter((r) => deps.prod.has(r) || deps.dev.has(r));
+  if (!named.length) return null; // can't tell
+  return named.every((r) => deps.dev.has(r) && !deps.prod.has(r));
+}
+
 function addTx(counts, name, version, advisories) {
   counts.txTargets = counts.txTargets || new Map();
   const e = counts.txTargets.get(name) || { version, advisories: [] };
@@ -177,7 +219,7 @@ function addTx(counts, name, version, advisories) {
   counts.txTargets.set(name, e);
 }
 
-function addTarget(majors, name, version, severity, advisories, counts) {
+function addTarget(majors, name, version, severity, advisories, counts, devOnly) {
   const cur = installedVersion(name);
   if (cur && isDowngrade(version, cur)) {
     counts.skipped = counts.skipped || new Set();
@@ -187,18 +229,20 @@ function addTarget(majors, name, version, severity, advisories, counts) {
     counts.downgrades++;
     return;
   }
-  const entry = majors.get(name) || { version, severity, advisories: [] };
+  const entry = majors.get(name) || { version, severity, advisories: [], devOnly: undefined };
   if (isDowngrade(entry.version, version)) entry.version = version; // several advisories: take the highest patched version
   entry.advisories.push(...advisories);
+  if (devOnly === false) entry.devOnly = false;            // any prod route wins
+  else if (devOnly === true && entry.devOnly === undefined) entry.devOnly = true;
   majors.set(name, entry);
 }
 
 function collectNpmAudit(counts) {
   console.log("→ npm audit --json");
   const audit = run("npm audit --json");
-  let report;
-  try { report = JSON.parse(audit.out.slice(audit.out.indexOf("{"), audit.out.lastIndexOf("}") + 1)); }
-  catch {
+  const report = parseJsonOutput(audit);
+  if (!report) {
+    console.error(audit.out.slice(-800));
     die(/lock/i.test(audit.out)
       ? "npm audit needs a package-lock.json — run `npm install` first"
       : "could not parse npm audit output");
@@ -208,6 +252,15 @@ function collectNpmAudit(counts) {
     if (!v || depth > 2) return [];
     return (v.via || []).flatMap((x) =>
       typeof x === "object" ? [x.url || x.title].filter(Boolean) : advisoriesOf(vulns[x], depth + 1));
+  };
+  const deps = manifestDeps();
+  const rootsOf = (name, seen = new Set()) => {
+    if (seen.has(name)) return [];
+    seen.add(name);
+    if (deps.prod.has(name) || deps.dev.has(name)) return [name];
+    const v = vulns[name];
+    if (!v || !v.effects || !v.effects.length) return [name];
+    return v.effects.flatMap((e) => rootsOf(e, seen));
   };
   const majors = new Map();
   for (const v of Object.values(vulns)) {
@@ -221,7 +274,7 @@ function collectNpmAudit(counts) {
       continue;
     }
     if (f === true || !f.isSemVerMajor) { counts.fixable++; continue; }
-    addTarget(majors, f.name, f.version, v.severity, advisoriesOf(v), counts);
+    addTarget(majors, f.name, f.version, v.severity, advisoriesOf(v), counts, classifyDev(rootsOf(v.name), deps));
   }
   if (counts.fixable) console.log(`→ ${counts.fixable} finding(s) fixable without a major bump — \`bumpwright fix\` applies them behind your test gate`);
   return majors;
@@ -255,9 +308,10 @@ function directDepDirs() {
 function collectPnpmAudit(counts) {
   console.log("→ pnpm audit --json");
   const audit = run("pnpm audit --json");
-  let report;
-  try { report = JSON.parse(audit.out.slice(audit.out.indexOf("{"), audit.out.lastIndexOf("}") + 1)); } catch { die("could not parse pnpm audit output"); }
+  const report = parseJsonOutput(audit);
+  if (!report) { console.error(audit.out.slice(-800)); die("could not parse pnpm audit output"); }
   const direct = directDepDirs(); // any workspace manifest counts as direct
+  const deps = manifestDeps();
   const majors = new Map();
   for (const adv of Object.values(report.advisories || {})) {
     const name = adv.module_name;
@@ -284,7 +338,8 @@ function collectPnpmAudit(counts) {
       .sort((a, b) => (isDowngrade(a, b) ? -1 : 1));
     const cur = found.pop() || installedVersion(name);
     if (cur && isDowngrade(m[1], cur)) { counts.downgrades++; continue; }
-    addTarget(majors, name, m[1], adv.severity || "security", [adv.url].filter(Boolean), counts);
+    const roots = (adv.findings || []).flatMap((f2) => (f2.paths || []).map((pp) => String(pp).split(">")[0]));
+    addTarget(majors, name, m[1], adv.severity || "security", [adv.url].filter(Boolean), counts, classifyDev(roots, deps));
     const entry = majors.get(name);
     if (entry) entry.dir = direct.get(name).dir;
   }
@@ -295,6 +350,7 @@ function collectPnpmAudit(counts) {
 function collectYarnBerryAudit(counts) {
   console.log("→ yarn npm audit --json --recursive");
   const audit = run("yarn npm audit --json --recursive --all");
+  const deps = manifestDeps();
   const majors = new Map();
   let lines = 0;
   for (const line of audit.out.split("\n")) {
@@ -312,7 +368,7 @@ function collectYarnBerryAudit(counts) {
     if (installed && isDowngrade(floor, installed)) { counts.downgrades++; continue; }
     const direct = (c.Dependents || []).some((d) => /@workspace:/.test(d));
     const url = c.URL ? [c.URL] : [];
-    if (direct) addTarget(majors, name, floor, String(c.Severity || "security"), url, counts);
+    if (direct) addTarget(majors, name, floor, String(c.Severity || "security"), url, counts, classifyDev([name], deps));
     else { addTx(counts, name, floor, url); counts.transitive++; }
   }
   if (!lines && audit.code !== 0) { console.error(audit.out.slice(-1200)); die("yarn npm audit produced no advisories — the scan did not run"); }
@@ -323,6 +379,7 @@ function collectYarnBerryAudit(counts) {
 function collectYarnAudit(counts) {
   console.log("→ yarn audit --json");
   const audit = run("yarn audit --json");
+  const deps = manifestDeps();
   const majors = new Map();
   const seenDirect = new Set();
   for (const line of audit.out.split("\n")) {
@@ -341,7 +398,8 @@ function collectYarnAudit(counts) {
       .sort((x, y) => (isDowngrade(x, y) ? -1 : 1)).pop() || installedVersion(name);
     if (cur && isDowngrade(floor, cur)) { counts.downgrades++; continue; }
     if (direct) {
-      addTarget(majors, name, floor, a.severity || "security", [a.url].filter(Boolean), counts);
+      const roots = findings.flatMap((f2) => (f2.paths || []).map((pp) => String(pp).split(">")[0]));
+      addTarget(majors, name, floor, a.severity || "security", [a.url].filter(Boolean), counts, classifyDev(roots.length ? roots : [name], deps));
       seenDirect.add(name);
     } else if (!seenDirect.has(name)) {
       addTx(counts, name, floor, [a.url].filter(Boolean));
@@ -400,19 +458,43 @@ function collectGoAudit(counts) {
 }
 
 function collectPyAudit(counts) {
-  const tool = run("command -v pip-audit").code === 0 ? "pip-audit" : "uvx pip-audit";
+  const tools = [];
+  if (run("command -v pip-audit").code === 0) tools.push("pip-audit");
+  if (run("python3 -c 'import pip_audit'").code === 0) tools.push("python3 -m pip_audit");
+  if (run("command -v uvx").code === 0) tools.push("uvx pip-audit");
+  if (!tools.length) die("pip-audit not available — install it with `pip install pip-audit` or `uv tool install pip-audit`");
+  const tool = tools[0];
   // Audit the project's own requirements, not whichever environment pip-audit runs in.
   let src = "";
-  if (fs.existsSync("requirements.txt")) src = "-r requirements.txt";
-  else if (pyUsesUv()) {
+  const reqCandidates = ["requirements.txt", "requirements-dev.txt", "requirements/all.txt", "requirements/base.txt", "requirements/dev.txt"];
+  const found = reqCandidates.filter((f) => fs.existsSync(f));
+  if (found.length) src = found.map((f) => `-r "${f}"`).join(" ");
+  else if (fs.existsSync("requirements") && fs.statSync("requirements").isDirectory()) {
+    const txts = fs.readdirSync("requirements").filter((f) => f.endsWith(".txt")).slice(0, 6);
+    if (txts.length) src = txts.map((f) => `-r "requirements/${f}"`).join(" ");
+  }
+  if (!src && pyUsesUv()) {
     const tmp = path.join(process.env.TMPDIR || "/tmp", `bw-req-${process.pid}.txt`);
     if (run(`uv export --format requirements-txt --no-emit-project -o "${tmp}"`).code === 0) src = `-r "${tmp}"`;
   }
-  if (!src) die("nothing to audit against: add requirements.txt or a uv lockfile — auditing an unrelated environment would report the wrong repo");
-  console.log(`→ ${tool} -f json ${src}`.trim());
-  const audit = run(`${tool} -f json ${src}`);
-  let report;
-  try { report = JSON.parse(audit.out.slice(audit.out.indexOf("{"), audit.out.lastIndexOf("}") + 1)); } catch { die("could not parse pip-audit output — is pip-audit installed?"); }
+  if (!src && fs.existsSync("pyproject.toml")) {
+    // last resort: let uv resolve the project's own metadata into a requirements set
+    const tmp = path.join(process.env.TMPDIR || "/tmp", `bw-pyproj-${process.pid}.txt`);
+    if (run(`uv pip compile pyproject.toml -o "${tmp}" --quiet`).code === 0) src = `-r "${tmp}"`;
+  }
+  if (!src) die("nothing to audit against: no requirements file, uv lockfile, or resolvable pyproject — auditing an unrelated environment would report the wrong repo");
+  let audit = null, report = null;
+  for (const t of tools) {
+    console.log(`→ ${t} -f json ${src}`.trim());
+    audit = run(`${t} -f json ${src}`);
+    report = parseJsonOutput(audit);
+    if (report) break;
+    console.error(`bumpwright: ${t} produced no usable output, trying the next available pip-audit`);
+  }
+  if (!report) {
+    console.error(audit ? audit.out.slice(-800) : "");
+    die("pip-audit could not run in this environment — install it directly (`pip install pip-audit`) and retry");
+  }
   const direct = new Set();
   if (fs.existsSync("requirements.txt"))
     for (const line of fs.readFileSync("requirements.txt", "utf8").split("\n")) {
@@ -475,7 +557,7 @@ function repairMode(argv) {
   // Files the agent must not "fix" by deleting the evidence.
   const testish = (f) => /(^|\/)(tests?|__tests__|spec)(\/|$)|\.(test|spec)\.[jt]sx?$|_test\.go$|test_.*\.py$/i.test(f);
 
-  let out = before.out, result = before;
+  let out = before.out, result = before, rationale = "";
   for (let i = 1; i <= a.maxIters; i++) {
     console.log(`✗ gate red — repair attempt ${i}/${a.maxIters}`);
     const prompt = `The command \`${a.test}\` fails in this repository, on a clean checkout, before any dependency change.
@@ -490,7 +572,8 @@ Rules:
 
 Failing output:
 ${result.out.slice(-8000)}`;
-    const agent = spawnSync(a.agent, { shell: true, input: prompt, stdio: ["pipe", "inherit", "inherit"] });
+    const agent = spawnSync(a.agent, { shell: true, input: prompt, encoding: "utf8", stdio: ["pipe", "pipe", "inherit"] });
+    if (agent.stdout) { process.stdout.write(agent.stdout); rationale = agent.stdout.trim(); }
     if ((agent.status ?? 1) !== 0) console.error("bumpwright: agent command exited non-zero, re-running the gate anyway");
 
     const depsTouched = run(`git diff --name-only "${startRef}"`).out.split("\n")
@@ -520,6 +603,7 @@ ${result.out.slice(-8000)}`;
   const msg = `Repair: make "${a.test}" pass again\n\n` +
     `The gate was failing on a clean checkout before any dependency change.\n` +
     `Files changed: ${changed.join(", ")}\n` +
+    (rationale ? `\n--- agent's root-cause analysis ---\n${rationale.slice(0, 4000)}\n` : "") +
     (touchedTests.length ? `\nWARNING: test files were modified (${touchedTests.join(", ")}) — verify the fix is real.\n` : "") +
     `\nAutomated by bumpwright repair; review before merging.`;
   if (commit(msg).code !== 0) die("git commit failed");
@@ -625,6 +709,10 @@ function auditMode(argv) {
     sync = detectPm().sync;
   }
   if (counts.downgrades) console.log(`→ ${counts.downgrades} proposed fix(es) skipped as downgrades`);
+  {
+    const devs = [...majors.values()].filter((x) => x.devOnly === true).length;
+    if (devs) console.log(`→ ${devs} of ${majors.size} target(s) are dev/build tooling only (no consumer exposure)`);
+  }
   const txT = (useOverrides && counts.txTargets) || new Map();
   if (counts.transitive && !useOverrides && !isPython())
     console.log("→ re-run with --overrides to pin transitive patched floors behind your gate (temporary, removable)");
@@ -632,9 +720,12 @@ function auditMode(argv) {
   const start = run("git rev-parse --abbrev-ref HEAD").out.trim();
   let failed = 0;
   for (const [name, info] of majors) {
-    console.log(`\n=== ${name}@${info.version} — security (${info.severity}) ===`);
+    const scope = info.devOnly === true ? " — dev/build tooling only, does not ship to consumers"
+      : info.devOnly === false ? "" : "";
+    console.log(`\n=== ${name}@${info.version} — security (${info.severity})${scope} ===`);
     const urls = [...new Set(info.advisories)];
-    const env = { ...process.env, BUMPWRIGHT_NOTE: urls.length ? `Security: fixes ${urls.join(", ")}` : `Security: fixes audit finding (${info.severity})` };
+    const devNote = info.devOnly === true ? "\n\nScope: this dependency is dev/build tooling only — it does not ship to consumers of this package." : "";
+    const env = { ...process.env, BUMPWRIGHT_NOTE: (urls.length ? `Security: fixes ${urls.join(", ")}` : `Security: fixes audit finding (${info.severity})`) + devNote };
     if (info.dir && info.dir !== ".") console.log(`→ in workspace ${info.dir}`);
     const r = spawnSync(process.execPath, [__filename, `${name}@${info.version}`, ...passthrough], { stdio: "inherit", env, cwd: info.dir || "." });
     if ((r.status ?? 1) !== 0) failed++;
@@ -693,6 +784,24 @@ function auditMode(argv) {
   const total = majors.size + (txT.size ? 1 : 0);
   console.log(failed ? `\n✗ ${failed}/${total} security upgrades did not reach green` : `\n✓ all ${total} security upgrades green`);
   process.exit(failed ? 1 : 0);
+}
+
+function writeBlockedReport(info) {
+  const file = "BUMPWRIGHT-BLOCKED.md";
+  const tail = String(info.output || "").slice(-3000);
+  const body = `# Blocked upgrade: ${info.pkg} ${info.from} -> ${info.to}\n\n` +
+    `The upgrade installed cleanly, but \`${info.gate}\` could not be brought back to green ` +
+    `after ${info.iters} automated attempt(s).\n\n` +
+    (info.branch ? `Branch with the attempt: \`${info.branch}\`\n\n` : "") +
+    `## What this means\n\n` +
+    `This upgrade needs a human decision, not a version bump: the calling code depends on ` +
+    `behaviour the new version changed or removed.\n\n` +
+    `## Failing output (tail)\n\n\`\`\`\n${tail}\n\`\`\`\n\n` +
+    `_Generated by bumpwright. Attach this to an issue or a comment when reporting upstream._\n`;
+  try {
+    fs.writeFileSync(file, body);
+    console.error(`\n→ wrote ${file} — a report you can paste into an issue`);
+  } catch { /* read-only checkout */ }
 }
 
 function main() {
@@ -773,6 +882,7 @@ function main() {
     if (result.code === 0) break;
     if (i === a.maxIters) {
       console.error(result.out.slice(-4000));
+      writeBlockedReport({ pkg: a.pkg, from: oldVersion, to: newVersion, gate: a.test, iters: a.maxIters, output: result.out, branch: a.branch ? branch : null });
       console.error(`\nbumpwright: tests still failing after ${a.maxIters} fix attempts.`);
       console.error(a.branch ? `Branch ${branch} left in place for manual work.` : "Changes left in working tree.");
       process.exit(1);

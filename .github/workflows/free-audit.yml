@@ -22,6 +22,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.23' }
       - name: Parse and validate request
         id: req
         env:
@@ -63,8 +65,11 @@ jobs:
           if [ -f pnpm-lock.yaml ]; then corepack enable 2>/dev/null; pnpm install --frozen-lockfile || pnpm install
           elif [ -f yarn.lock ]; then yarn install --frozen-lockfile || yarn install
           elif [ -f package.json ]; then npm ci || npm install
-          elif [ -f requirements.txt ] || [ -f pyproject.toml ]; then
+          elif [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -d requirements ]; then
             python3 -m pip install --quiet pip-audit uv
+          elif [ -f go.mod ]; then
+            go mod download && go install golang.org/x/vuln/cmd/govulncheck@latest
+            echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           fi
           T="${{ steps.req.outputs.test }}"
           if [ -n "$T" ]; then node ../bin/bumpwright.js audit --max-iters 0 --test "$T" > ../audit.log 2>&1

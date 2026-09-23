@@ -126,6 +126,26 @@ its advisory and the instruction to remove it once the parent updates. Red →
 reverted, nothing ships. Off by default because overrides are debt — this
 makes the debt visible, gated, and removable instead of silent.
 
+## Scope: what actually ships
+
+Audit labels findings that are only reachable through `devDependencies`:
+
+```
+→ 6 of 6 target(s) are dev/build tooling only (no consumer exposure)
+```
+
+A vulnerability in your bundler doesn't reach the people who install your
+package. The label lands in the commit and PR body too, so reviewers can weigh
+the fix instead of guessing at its urgency.
+
+## When an upgrade can't be saved
+
+If the agent can't get the gate green, bumpwright writes
+`BUMPWRIGHT-BLOCKED.md`: what was attempted, the branch it left behind, and the
+failing output — a report you can paste straight into an issue. A tool that
+tells you exactly why you're stuck is worth nearly as much as one that unsticks
+you.
+
 ## `bumpwright repair` — when the gate is already red
 
 An upgrade needs a green baseline to prove anything, so bumpwright refuses to
