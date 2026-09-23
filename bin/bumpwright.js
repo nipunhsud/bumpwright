@@ -106,12 +106,21 @@ function goCurrentVersion(mod) {
 }
 function goVersionSpec(v) { return v === "latest" ? "latest" : (/^\d/.test(v) ? `v${v}` : v); }
 
+function isYarnBerry() {
+  if (!fs.existsSync("yarn.lock")) return false;
+  if (fs.existsSync(".yarnrc.yml")) return true;
+  try { return /^__metadata:/m.test(fs.readFileSync("yarn.lock", "utf8").slice(0, 4000)); } catch { return false; }
+}
+
 function detectPm() {
   let d = process.cwd();
   for (;;) {
     if (fs.existsSync(path.join(d, "pnpm-lock.yaml")))
       return { install: d === process.cwd() && fs.existsSync(path.join(d, "pnpm-workspace.yaml")) ? "pnpm add -w" : "pnpm add", test: "pnpm test", sync: "pnpm install --frozen-lockfile" };
-    if (fs.existsSync(path.join(d, "yarn.lock"))) return { install: "yarn add", test: "yarn test", sync: "yarn install --frozen-lockfile" };
+    if (fs.existsSync(path.join(d, "yarn.lock")))
+      return d === process.cwd() && isYarnBerry()
+        ? { install: "yarn add", test: "yarn test", sync: "yarn install --immutable" }
+        : { install: "yarn add", test: "yarn test", sync: "yarn install --frozen-lockfile" };
     if (fs.existsSync(path.join(d, "package-lock.json"))) break;
     const up = path.dirname(d);
     if (up === d) break;
@@ -283,8 +292,35 @@ function collectPnpmAudit(counts) {
   return majors;
 }
 
+function collectYarnBerryAudit(counts) {
+  console.log("→ yarn npm audit --json --recursive");
+  const audit = run("yarn npm audit --json --recursive --all");
+  const majors = new Map();
+  let lines = 0;
+  for (const line of audit.out.split("\n")) {
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    const c = o && o.children;
+    if (!o || !o.value || !c) continue;
+    lines++;
+    const name = o.value;
+    // "Vulnerable Versions" like "<0.2.4" or ">=1.0.0 <1.2.3": the upper bounds are the patched floors
+    const floors = [...String(c["Vulnerable Versions"] || "").matchAll(/<\s*=?\s*([\d][\w.-]*)/g)].map((x) => x[1]);
+    if (!floors.length) { counts.transitive++; continue; }
+    const floor = floors.sort((a, b) => (isDowngrade(a, b) ? -1 : 1)).pop();
+    const installed = (c["Tree Versions"] || []).slice().sort((a, b) => (isDowngrade(a, b) ? -1 : 1)).pop();
+    if (installed && isDowngrade(floor, installed)) { counts.downgrades++; continue; }
+    const direct = (c.Dependents || []).some((d) => /@workspace:/.test(d));
+    const url = c.URL ? [c.URL] : [];
+    if (direct) addTarget(majors, name, floor, String(c.Severity || "security"), url, counts);
+    else { addTx(counts, name, floor, url); counts.transitive++; }
+  }
+  if (!lines && audit.code !== 0) { console.error(audit.out.slice(-1200)); die("yarn npm audit produced no advisories — the scan did not run"); }
+  if (counts.transitive) console.log(`→ ${counts.transitive} finding(s) in transitive deps — out of scope for a direct bump (resolutions or upstream)`);
+  return majors;
+}
+
 function collectYarnAudit(counts) {
-  if (fs.existsSync(".yarnrc.yml")) die("yarn berry (v2+) isn't supported yet — classic yarn.lock only");
   console.log("→ yarn audit --json");
   const audit = run("yarn audit --json");
   const majors = new Map();
@@ -578,8 +614,9 @@ function auditMode(argv) {
     majors = collectPnpmAudit(counts);
     sync = "pnpm install --frozen-lockfile";
   } else if (fs.existsSync("yarn.lock")) {
-    majors = collectYarnAudit(counts);
-    sync = "yarn install --frozen-lockfile";
+    const berry = isYarnBerry();
+    majors = berry ? collectYarnBerryAudit(counts) : collectYarnAudit(counts);
+    sync = berry ? "yarn install --immutable" : "yarn install --frozen-lockfile";
   } else if (isGo()) {
     majors = collectGoAudit(counts);
     sync = "true"; // the module cache is content-addressed; restoring go.mod/go.sum restores everything

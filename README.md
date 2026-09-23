@@ -169,9 +169,10 @@ bumpwright audit --pr
 ```
 
 Works across ecosystems: `npm audit` for npm repos, `pnpm audit` for pnpm
-workspaces, `yarn audit` for classic yarn repos (direct vulns get per-package
-branches; transitive ones are reported, or pinned via `resolutions` with
-`--overrides`), and `pip-audit` for Python projects. Findings a plain
+workspaces, `yarn audit` for classic yarn and `yarn npm audit` for yarn berry
+(v2+, including PnP), `pip-audit` for Python, and `govulncheck` for Go. Direct
+vulnerabilities get per-package branches; transitive ones are reported, or
+pinned via overrides/resolutions with `--overrides`. Findings a plain
 `npm audit fix` can handle are left to it; every fix that needs a real
 version jump runs the full migrate loop on its own branch. Proposed
 downgrades are skipped, and multiple advisories on one package resolve
