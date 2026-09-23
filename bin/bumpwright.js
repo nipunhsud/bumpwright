@@ -442,12 +442,16 @@ function fixMode(argv) {
 
 function auditMode(argv) {
   if (!fs.existsSync("package.json") && !isPython() && !isGo()) die("no package.json, pyproject.toml/requirements.txt, or go.mod here — run from your project root");
-  const passthrough = [];
+  const passthrough = [], stray = [];
   for (let i = 0; i < argv.length; i++) {
     const v = argv[i];
     if (["--test", "--agent", "--max-iters"].includes(v)) passthrough.push(v, need(argv[++i], v));
     else if (["--pr", "--no-branch", "--workspaces"].includes(v)) passthrough.push(v);
+    else stray.push(v);
   }
+  if (stray.length)
+    die(`unrecognized argument(s): ${stray.join(" ")}\n` +
+        `       a multi-word --agent command must be quoted, e.g. --agent "claude -p --permission-mode acceptEdits"`);
   let useOverrides = false;
   const oi = argv.indexOf("--overrides");
   if (oi >= 0) { useOverrides = true; argv.splice(oi, 1); }
