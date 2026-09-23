@@ -330,11 +330,18 @@ function jsonStream(text) {
 }
 
 function collectGoAudit(counts) {
-  const tool = run("command -v govulncheck").code === 0 ? "govulncheck" : "go run golang.org/x/vuln/cmd/govulncheck@latest";
+  const haveBin = run("command -v govulncheck").code === 0;
+  const tool = haveBin ? "govulncheck" : "go run golang.org/x/vuln/cmd/govulncheck@latest";
+  if (!haveBin) console.log("→ govulncheck not installed; fetching it via `go run` (slower)");
   console.log(`→ ${tool} -json ./...`);
   const audit = run(`${tool} -json ./...`);
   const objs = jsonStream(audit.out);
-  if (!objs.length) { console.error(audit.out.slice(-1500)); die("could not parse govulncheck output — is Go installed?"); }
+  // An empty scan is not a clean scan: treat "no output at all" as a failure,
+  // never as "no vulnerabilities".
+  if (!objs.length) {
+    console.error(audit.out.slice(-1500));
+    die("govulncheck produced no output — the scan did not run (timeout, fetch failure, or build error). This is not a clean result.");
+  }
   const majors = new Map();
   for (const o of objs) {
     const f = o.finding;
