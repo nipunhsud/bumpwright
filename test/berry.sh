@@ -3,6 +3,13 @@
 set -euo pipefail
 BW="$(cd "$(dirname "$0")/.." && pwd)/bin/bumpwright.js"
 command -v yarn >/dev/null || { echo "SKIP: yarn not installed"; exit 0; }
+LOG=$(mktemp)
+# Provisioning berry needs the network; if it can't be set up here, skip loudly
+# rather than failing the suite for an environment reason.
+setup_berry() {
+  yarn set version berry >>"$LOG" 2>&1 || { echo "SKIP: cannot provision yarn berry ($(tail -1 "$LOG"))"; exit 0; }
+  yarn install >>"$LOG" 2>&1 || { echo "SKIP: berry install failed ($(tail -1 "$LOG"))"; exit 0; }
+}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -10,8 +17,7 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir "$TMP/bd" && cd "$TMP/bd"
 git init -q -b main && git config user.email t@t && git config user.name t
 printf '{ "name":"bd","private":true,"dependencies":{"minimist":"0.0.8"},"scripts":{"test":"exit 0"} }' > package.json
-yarn set version berry >/dev/null 2>&1
-yarn install >/dev/null 2>&1
+setup_berry
 printf '.yarn/\n.pnp.*\n' > .gitignore
 git add -A && git commit -qm init
 node "$BW" audit >/dev/null 2>&1 || { echo "FAIL: berry audit run failed"; exit 1; }
@@ -25,8 +31,7 @@ echo "BERRY DIRECT OK"
 mkdir "$TMP/bt" && cd "$TMP/bt"
 git init -q -b main && git config user.email t@t && git config user.name t
 printf '{ "name":"bt","private":true,"dependencies":{"mkdirp":"0.5.1"},"scripts":{"test":"exit 0"} }' > package.json
-yarn set version berry >/dev/null 2>&1
-yarn install >/dev/null 2>&1
+setup_berry
 printf '.yarn/\n.pnp.*\n' > .gitignore
 git add -A && git commit -qm init
 node "$BW" audit --overrides >/dev/null 2>&1 || { echo "FAIL: berry overrides run failed"; exit 1; }
