@@ -62,9 +62,10 @@ jobs:
           cd target || exit 1
           git config user.name "bumpwright"
           git config user.email "bumpwright[bot]@users.noreply.github.com"
-          if [ -f pnpm-lock.yaml ]; then corepack enable 2>/dev/null; pnpm install --frozen-lockfile || pnpm install
-          elif [ -f yarn.lock ]; then yarn install --frozen-lockfile || yarn install
-          elif [ -f package.json ]; then npm ci || npm install
+          if [ -f pnpm-lock.yaml ] || [ -f yarn.lock ] || [ -f package.json ]; then
+            corepack enable 2>/dev/null
+            node ../bin/bumpwright.js install > ../install.log 2>&1 || true
+            tail -3 ../install.log
           elif [ -f requirements.txt ] || [ -f pyproject.toml ] || [ -d requirements ]; then
             python3 -m pip install --quiet pip-audit uv
           elif [ -f go.mod ]; then
@@ -93,7 +94,7 @@ jobs:
               PRS=$(printf '%s\n- `%s` pushed to the fork — admin request, no PR opened on `%s` (open manually if wanted)' "$PRS" "$B" "$REPO")
             fi
           done
-          SUMMARY=$(grep -E "no vulnerabilities|fixable without|downgrade|transitive|already red|committed upgrade|committed npm audit fix|safely change|^bumpwright:" ../audit.log | sort -u | head -10 | sed 's/^/> /')
+          SUMMARY=$(cat ../install.log 2>/dev/null | grep -E "installed, but only with|cannot be built" | sed 's/^/> /'; grep -E "no vulnerabilities|fixable without|downgrade|transitive|already red|committed upgrade|committed npm audit fix|safely change|^bumpwright:" ../audit.log | sort -u | head -10 | sed 's/^/> /')
           [ -z "$SUMMARY" ] && SUMMARY="> no findings output — log tail: $(tail -2 ../audit.log | tr '\n' ' § ')"
           OUT=$(printf '**bumpwright free audit of `%s`**\n\n%s\n' "$REPO" "$SUMMARY")
           [ -n "$PRS" ] && OUT=$(printf '%s\n**Green upgrade PRs opened:**%s\n' "$OUT" "$PRS")

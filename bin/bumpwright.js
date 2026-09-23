@@ -10,6 +10,7 @@ const HELP = `bumpwright <package>[@version] [options]
        bumpwright fix [options]        Apply npm audit fix behind your test gate (non-breaking)
        bumpwright audit --overrides    Also pin vulnerable TRANSITIVE deps to patched floors (temporary, gated)
        bumpwright repair [options]     Gate already red? Drive an agent until it goes green (no deps touched)
+       bumpwright install              Can't even install? Try the ladder and report what it took
 
 Upgrades an npm dependency, runs your tests, and if they break, drives a
 coding agent to migrate your calling code until they pass again.
@@ -518,6 +519,42 @@ function collectPyAudit(counts) {
   return majors;
 }
 
+// Stale repos often fail `npm ci` outright (peer graphs that modern npm
+// refuses), so nothing else can run. Walk the ladder and say which rung worked:
+// needing --legacy-peer-deps is itself a finding worth reporting.
+function installMode(argv) {
+  for (const v of argv) if (v !== "--quiet") die(`unrecognized argument: ${v}`);
+  if (!fs.existsSync("package.json") && !isPython() && !isGo())
+    die("no package.json, pyproject.toml/requirements.txt, or go.mod here — run from your project root");
+
+  let rungs;
+  if (isGo()) rungs = [["go mod download", "clean"]];
+  else if (isPython()) rungs = pyUsesUv()
+    ? [["uv sync", "clean"]]
+    : [["python3 -m pip install -r requirements.txt", "clean"]];
+  else if (fs.existsSync("pnpm-lock.yaml"))
+    rungs = [["pnpm install --frozen-lockfile", "clean"], ["pnpm install", "lockfile out of date"], ["pnpm install --no-frozen-lockfile", "lockfile rewritten"]];
+  else if (fs.existsSync("yarn.lock"))
+    rungs = isYarnBerry()
+      ? [["yarn install --immutable", "clean"], ["yarn install --no-immutable", "lockfile rewritten"]]
+      : [["yarn install --frozen-lockfile", "clean"], ["yarn install", "lockfile out of date"]];
+  else
+    rungs = [["npm ci", "clean"], ["npm install", "lockfile out of date"], ["npm install --legacy-peer-deps", "peer dependency graph is unsatisfiable on modern npm"]];
+
+  for (const [cmd, note] of rungs) {
+    console.log(`→ ${cmd}`);
+    const r = run(cmd);
+    if (r.code === 0) {
+      console.log(note === "clean" ? "✓ installed cleanly" : `✓ installed, but only with \`${cmd}\` — ${note}`);
+      if (note !== "clean") console.log("  (that is a real finding: a fresh clone of this repo does not install with its own lockfile)");
+      process.exit(0);
+    }
+    console.log(`✗ ${cmd} failed`);
+  }
+  console.error("bumpwright: every install strategy failed — this repo cannot be built from a clean clone");
+  process.exit(1);
+}
+
 function repairMode(argv) {
   const a = { test: null, agent: "claude -p --permission-mode acceptEdits", maxIters: 3, branch: true, pr: false };
   for (let i = 0; i < argv.length; i++) {
@@ -809,6 +846,7 @@ function main() {
   if (process.argv[2] === "audit") return auditMode(process.argv.slice(3));
   if (process.argv[2] === "fix") return fixMode(process.argv.slice(3));
   if (process.argv[2] === "repair") return repairMode(process.argv.slice(3));
+  if (process.argv[2] === "install") return installMode(process.argv.slice(3));
   const a = parseArgs(process.argv.slice(2));
 
   if (!fs.existsSync("package.json") && !isPython() && !isGo()) die("no package.json, pyproject.toml/requirements.txt, or go.mod here — run from your project root");

@@ -146,6 +146,18 @@ failing output — a report you can paste straight into an issue. A tool that
 tells you exactly why you're stuck is worth nearly as much as one that unsticks
 you.
 
+## `bumpwright install` — when a fresh clone won't even install
+
+```
+bumpwright install
+```
+
+Walks the ladder for your package manager (`npm ci` → `npm install` →
+`--legacy-peer-deps`, and the pnpm/yarn/berry equivalents) and reports which
+rung worked. Needing anything past the first rung is itself a finding: a fresh
+clone of that repo does not install with its own lockfile. Stale projects
+usually fail here, long before any upgrade can be attempted.
+
 ## `bumpwright repair` — when the gate is already red
 
 An upgrade needs a green baseline to prove anything, so bumpwright refuses to

@@ -1,6 +1,6 @@
 {
   "name": "bumpwright",
-  "version": "0.13.1",
+  "version": "0.14.0",
   "description": "Upgrade a dependency, then fix the breaking changes — not just the version number. Dependabot bumps; bumpwright migrates.",
   "bin": {
     "bumpwright": "bin/bumpwright.js",
@@ -29,6 +29,6 @@
     "url": "git+https://github.com/nipunhsud/bumpwright.git"
   },
   "scripts": {
-    "test": "bash test/smoke.sh && bash test/mcp.sh && bash test/v02.sh && bash test/python.sh && bash test/audit-eco.sh && bash test/fix.sh && bash test/go.sh && bash test/repair.sh && bash test/berry.sh && bash test/devscope.sh && bash test/blocked.sh"
+    "test": "bash test/smoke.sh && bash test/mcp.sh && bash test/v02.sh && bash test/python.sh && bash test/audit-eco.sh && bash test/fix.sh && bash test/go.sh && bash test/repair.sh && bash test/berry.sh && bash test/devscope.sh && bash test/blocked.sh && bash test/install.sh"
   }
 }
