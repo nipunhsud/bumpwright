@@ -118,8 +118,14 @@ function goVersionSpec(v) { return v === "latest" ? "latest" : (/^\d/.test(v) ? 
 
 function isYarnBerry() {
   if (!fs.existsSync("yarn.lock")) return false;
-  if (fs.existsSync(".yarnrc.yml")) return true;
-  try { return /^__metadata:/m.test(fs.readFileSync("yarn.lock", "utf8").slice(0, 4000)); } catch { return false; }
+  // The lockfile decides: a stray .yarnrc.yml is common in classic repos (a
+  // berry-only key classic yarn ignores), and misreading it routes the repo
+  // to `yarn npm audit`, which classic yarn does not have.
+  let head = "";
+  try { head = fs.readFileSync("yarn.lock", "utf8").slice(0, 4000); } catch { return false; }
+  if (/^__metadata:/m.test(head)) return true;
+  if (/^# yarn lockfile v1/m.test(head)) return false;
+  return fs.existsSync(".yarnrc.yml");
 }
 
 function detectPm() {
@@ -803,6 +809,9 @@ function auditMode(argv) {
       if (after.code !== 0) {
         console.error(after.out.slice(-2500));
         run(`git checkout -f "${start}"`); run("git checkout -- ."); run(sync);
+        // nothing shipped, so don't leave the branch behind: its own existence
+        // makes the next --overrides run abort at the checkout -b above.
+        run("git branch -D bumpwright/security-overrides");
         console.error("bumpwright: overrides broke the gate — reverted, nothing shipped");
         failed++;
       } else {
