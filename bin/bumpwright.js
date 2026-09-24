@@ -106,6 +106,16 @@ function pyRecordRequirement(pkg, newVersion) {
   if (re.test(txt)) fs.writeFileSync("requirements.txt", txt.replace(re, `${pkg}==${newVersion}`));
 }
 
+function pyManifestVersion(pkg) {
+  // The manifest is requirements.txt (pyRecordRequirement writes it), so read the pin from there.
+  // pyCurrentVersion reads the ENVIRONMENT, which drifts from the pin; using it as the "from"
+  // version reported an upgrade of a stale venv as a downgrade of the project.
+  if (!fs.existsSync("requirements.txt")) return null;
+  const esc = pkg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = fs.readFileSync("requirements.txt", "utf8").match(new RegExp(`^${esc}\\s*==\\s*([^\\s;#]+)`, "mi"));
+  return m ? m[1].trim() : null;
+}
+
 function isGo() {
   return !fs.existsSync("package.json") && !isPython() && fs.existsSync("go.mod");
 }
@@ -883,7 +893,12 @@ function main() {
 
   const targets = a.workspaces && !a.pm.py ? workspaceDirs(a.pkg) : ["."];
   if (a.workspaces && !a.pm.py) console.log(`→ workspaces declaring ${a.pkg}: ${targets.join(", ")}`);
-  const oldVersion = (a.pm.py ? pyCurrentVersion(a.pkg) : a.pm.go ? goCurrentVersion(a.pkg) : currentVersion(a.pkg, targets[0])) || "(not yet a dependency)";
+  const oldVersion = (a.pm.py ? (pyManifestVersion(a.pkg) || pyCurrentVersion(a.pkg)) : a.pm.go ? goCurrentVersion(a.pkg) : currentVersion(a.pkg, targets[0])) || "(not yet a dependency)";
+  if (a.pm.py) {
+    const env = pyCurrentVersion(a.pkg);
+    if (env && isDowngrade(a.version, env))
+      console.log(`\u2192 note: installed ${a.pkg} is ${env}, ahead of the ${oldVersion} pin; the gate will run against ${a.version}`);
+  }
   const branch = "bumpwright/" + `${a.pkg}-${a.version}`.replace(/[^a-zA-Z0-9._-]/g, "-").replace(/^-+/, "");
   if (a.branch) {
     if (run(`git checkout -b "${branch}"`).code !== 0) die(`could not create branch ${branch} (already exists?)`);
@@ -936,7 +951,7 @@ function main() {
       process.exit(1);
     }
     console.log(`✗ tests failing — fix attempt ${i + 1}/${a.maxIters}`);
-    const prompt = `The npm dependency "${a.pkg}" in this repository was just upgraded from ${oldVersion} to ${newVersion}.
+    const prompt = `The ${a.pm.py ? "Python" : a.pm.go ? "Go" : "npm"} dependency "${a.pkg}" in this repository was just upgraded from ${oldVersion} to ${newVersion}.
 The test command \`${a.test}\` now fails with the output below.
 
 Fix this repository's source code so it works with ${a.pkg}@${newVersion}.
